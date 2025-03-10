@@ -165,13 +165,6 @@ def main():
     else:
         print(f"\nParquet file size: {file_size_mb:.2f} MB")
 
-    # Calculate compression ratio if the original text file exists
-    txt_filename = f"./ShapeFragments/{number_of_protons}_{number_of_neutrons}_AllShapeFragments.txt"
-    if os.path.exists(txt_filename):
-        txt_size_bytes = os.path.getsize(txt_filename)
-        compression_ratio = txt_size_bytes / file_size_bytes
-        print(f"Compression ratio compared to text file: {compression_ratio:.2f}x")
-
 
 if __name__ == "__main__":
     main()
