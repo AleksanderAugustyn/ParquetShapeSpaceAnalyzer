@@ -45,9 +45,6 @@ def main():
     # Create dictionary to store all unique values for each column
     column_unique_values = {}
 
-    # Create dictionary to store combinations of columns 1 and 2
-    column_pair_counts = defaultdict(int)
-
     # Create dictionary to store combinations of column 2 with all other columns
     column2_combinations = defaultdict(lambda: defaultdict(int))
 
@@ -97,18 +94,15 @@ def main():
                 for val, count in counts_chunk.items():
                     column_value_counts[col][val] += count
 
-        # Count combinations of columns 1 and 2 in true rows using vectorized operations
-        if col1 is not None and col2 is not None and not true_rows.empty:
-            # Use pandas groupby to count combinations efficiently
-            combo_counts = true_rows.groupby([col1, col2]).size().reset_index(name='count')
-            # Update the counts dictionary
-            for _, row in combo_counts.iterrows():
-                column_pair_counts[(row[col1], row[col2])] += row['count']
+        # Process column_name and get the first two non-flag columns
+        non_flag_columns = [col for col in column_names if col != 'flag']
+        col1 = non_flag_columns[0] if len(non_flag_columns) > 0 else None
+        col2 = non_flag_columns[1] if len(non_flag_columns) > 1 else None
 
-        # Process combinations of column 2 with all other columns
+        # Process combinations of column 2 with all other columns (including col1)
         if col2 is not None and not true_rows.empty:
             for col in column_names:
-                if col != 'flag' and col != col2:
+                if col != 'flag' and col != col2:  # Exclude flag and col2 itself
                     # Use pandas groupby to count combinations efficiently
                     combo_counts = true_rows.groupby([col2, col]).size().reset_index(name='count')
                     # Update the counts dictionary
@@ -171,12 +165,10 @@ def main():
             }
         },
         "column_analysis": {},
-        "combination_analysis": {
-            "columns": [col1, col2] if col1 is not None and col2 is not None else []
+        "column2_combinations": {
+            "base_column": col2
         }
     }
-
-    count, min_count, max_count = 0, 0, 0
 
     # Add column analysis results
     for col in column_names:
@@ -208,12 +200,6 @@ def main():
                 elif isinstance(val_display, (np.floating, np.float64, np.float32)):
                     val_display = float(val_display)
 
-                if isinstance(min_count, (np.integer, np.int64, np.int32)):
-                    min_count = int(min_count)
-
-                if isinstance(max_count, (np.integer, np.int64, np.int32)):
-                    max_count = int(max_count)
-
                 # Add data for this value
                 column_data.append({
                     "value": val_display,
@@ -225,66 +211,9 @@ def main():
             # Add this column's data to the results
             analysis_results["column_analysis"][col] = column_data
 
-    # Add combination analysis results
-    if col1 is not None and col2 is not None:
-        combo_data = []
-
-        # Sort combinations for consistent output
-        for (val1, val2), count in sorted(column_pair_counts.items()):
-            # Handle quantized float columns if needed
-            if 'quantized' in col1:
-                val1_display = round(val1 * 0.05, 2)
-            else:
-                val1_display = val1
-
-            if 'quantized' in col2:
-                val2_display = round(val2 * 0.05, 2)
-            else:
-                val2_display = val2
-
-            percentage = (count / t_count) * 100 if t_count > 0 else 0
-
-            # Convert numpy types to Python native types
-            if isinstance(val1, (np.integer, np.int64, np.int32)):
-                val1 = int(val1)
-            elif isinstance(val1, (np.floating, np.float64, np.float32)):
-                val1 = float(val1)
-
-            if isinstance(val2, (np.integer, np.int64, np.int32)):
-                val2 = int(val2)
-            elif isinstance(val2, (np.floating, np.float64, np.float32)):
-                val2 = float(val2)
-
-            if isinstance(val1_display, (np.integer, np.int64, np.int32)):
-                val1_display = int(val1_display)
-            elif isinstance(val1_display, (np.floating, np.float64, np.float32)):
-                val1_display = float(val1_display)
-
-            if isinstance(val2_display, (np.integer, np.int64, np.int32)):
-                val2_display = int(val2_display)
-            elif isinstance(val2_display, (np.floating, np.float64, np.float32)):
-                val2_display = float(val2_display)
-
-            if isinstance(count, (np.integer, np.int64, np.int32)):
-                count = int(count)
-
-            # Add data for this combination
-            combo_data.append({
-                "values": [val1_display, val2_display],
-                "raw_values": [val1, val2],  # Keep original values
-                "count": count,
-                "percentage": round(percentage, 2)
-            })
-
-        # Add combination data to the results
-        analysis_results["combination_analysis"]["data"] = combo_data
-
     # Add column2_combinations analysis to the results
     if col2 is not None:
-        analysis_results["column2_combinations"] = {
-            "base_column": col2,
-            "combinations": {}
-        }
+        analysis_results["column2_combinations"]["combinations"] = {}
 
         for col, combinations in column2_combinations.items():
             combo_data = []
@@ -404,8 +333,11 @@ def main():
                 elif isinstance(max_val_display, (np.floating, np.float64, np.float32)) and max_val_display is not None:
                     max_val_display = float(max_val_display)
 
-                if isinstance(count, (np.integer, np.int64, np.int32)):
-                    count = int(count)
+                if isinstance(min_count, (np.integer, np.int64, np.int32)):
+                    min_count = int(min_count)
+
+                if isinstance(max_count, (np.integer, np.int64, np.int32)):
+                    max_count = int(max_count)
 
                 columns_info[col] = {
                     "min": min_val_display,
