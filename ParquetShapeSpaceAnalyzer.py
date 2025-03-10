@@ -48,6 +48,17 @@ def main():
     # Create dictionary to store combinations of columns 1 and 2
     column_pair_counts = defaultdict(int)
 
+    # Create dictionary to store combinations of column 2 with all other columns
+    column2_combinations = defaultdict(lambda: defaultdict(int))
+
+    # Create dictionary to store min/max values for each column per column 2 value
+    column2_value_analysis = defaultdict(lambda: defaultdict(lambda: {
+        "min": None,
+        "max": None,
+        "min_count": 0,
+        "max_count": 0
+    }))
+
     # Get the first two non-flag columns
     non_flag_columns = [col for col in column_names if col != 'flag']
     col1 = non_flag_columns[0] if len(non_flag_columns) > 0 else None
@@ -94,6 +105,34 @@ def main():
             for _, row in combo_counts.iterrows():
                 column_pair_counts[(row[col1], row[col2])] += row['count']
 
+        # Process combinations of column 2 with all other columns
+        if col2 is not None and not true_rows.empty:
+            for col in column_names:
+                if col != 'flag' and col != col2:
+                    # Use pandas groupby to count combinations efficiently
+                    combo_counts = true_rows.groupby([col2, col]).size().reset_index(name='count')
+                    # Update the counts dictionary
+                    for _, row in combo_counts.iterrows():
+                        col2_val = row[col2]
+                        col_val = row[col]
+                        count = row['count']
+
+                        # Update combination counts
+                        column2_combinations[col][(col2_val, col_val)] += count
+
+                        # Update min/max analysis for each column 2 value
+                        if column2_value_analysis[col2_val][col]["min"] is None or col_val < column2_value_analysis[col2_val][col]["min"]:
+                            column2_value_analysis[col2_val][col]["min"] = col_val
+                            column2_value_analysis[col2_val][col]["min_count"] = count
+                        elif col_val == column2_value_analysis[col2_val][col]["min"]:
+                            column2_value_analysis[col2_val][col]["min_count"] += count
+
+                        if column2_value_analysis[col2_val][col]["max"] is None or col_val > column2_value_analysis[col2_val][col]["max"]:
+                            column2_value_analysis[col2_val][col]["max"] = col_val
+                            column2_value_analysis[col2_val][col]["max_count"] = count
+                        elif col_val == column2_value_analysis[col2_val][col]["max"]:
+                            column2_value_analysis[col2_val][col]["max_count"] += count
+
         # Calculate memory usage if not already calculated
         if memory_per_row is None:
             memory_usage = chunk.memory_usage(deep=True).sum()
@@ -137,6 +176,8 @@ def main():
         }
     }
 
+    count, min_count, max_count = 0, 0, 0
+
     # Add column analysis results
     for col in column_names:
         if col != 'flag':
@@ -167,8 +208,11 @@ def main():
                 elif isinstance(val_display, (np.floating, np.float64, np.float32)):
                     val_display = float(val_display)
 
-                if isinstance(count, (np.integer, np.int64, np.int32)):
-                    count = int(count)
+                if isinstance(min_count, (np.integer, np.int64, np.int32)):
+                    min_count = int(min_count)
+
+                if isinstance(max_count, (np.integer, np.int64, np.int32)):
+                    max_count = int(max_count)
 
                 # Add data for this value
                 column_data.append({
@@ -234,6 +278,146 @@ def main():
 
         # Add combination data to the results
         analysis_results["combination_analysis"]["data"] = combo_data
+
+    # Add column2_combinations analysis to the results
+    if col2 is not None:
+        analysis_results["column2_combinations"] = {
+            "base_column": col2,
+            "combinations": {}
+        }
+
+        for col, combinations in column2_combinations.items():
+            combo_data = []
+
+            # Sort combinations for consistent output
+            for (val1, val2), count in sorted(combinations.items()):
+                # Handle quantized float columns if needed
+                if 'quantized' in col2:
+                    val1_display = round(val1 * 0.05, 2)
+                else:
+                    val1_display = val1
+
+                if 'quantized' in col:
+                    val2_display = round(val2 * 0.05, 2)
+                else:
+                    val2_display = val2
+
+                percentage = (count / t_count) * 100 if t_count > 0 else 0
+
+                # Convert numpy types to Python native types
+                if isinstance(val1, (np.integer, np.int64, np.int32)):
+                    val1 = int(val1)
+                elif isinstance(val1, (np.floating, np.float64, np.float32)):
+                    val1 = float(val1)
+
+                if isinstance(val2, (np.integer, np.int64, np.int32)):
+                    val2 = int(val2)
+                elif isinstance(val2, (np.floating, np.float64, np.float32)):
+                    val2 = float(val2)
+
+                if isinstance(val1_display, (np.integer, np.int64, np.int32)):
+                    val1_display = int(val1_display)
+                elif isinstance(val1_display, (np.floating, np.float64, np.float32)):
+                    val1_display = float(val1_display)
+
+                if isinstance(val2_display, (np.integer, np.int64, np.int32)):
+                    val2_display = int(val2_display)
+                elif isinstance(val2_display, (np.floating, np.float64, np.float32)):
+                    val2_display = float(val2_display)
+
+                if isinstance(count, (np.integer, np.int64, np.int32)):
+                    count = int(count)
+
+                # Add data for this combination
+                combo_data.append({
+                    "values": [val1_display, val2_display],
+                    "raw_values": [val1, val2],
+                    "count": count,
+                    "percentage": round(percentage, 2)
+                })
+
+            # Add combination data to the results
+            analysis_results["column2_combinations"]["combinations"][col] = combo_data
+
+    # Add column2_value_analysis to the results
+    if col2 is not None:
+        analysis_results["column2_value_analysis"] = {
+            "column": col2,
+            "values": {}
+        }
+
+        for val2 in sorted(column2_value_analysis.keys()):
+            # Handle quantized float columns if needed
+            if 'quantized' in col2:
+                val2_display = round(val2 * 0.05, 2)
+            else:
+                val2_display = val2
+
+            # Convert numpy types to Python native types
+            if isinstance(val2, (np.integer, np.int64, np.int32)):
+                val2 = int(val2)
+            elif isinstance(val2, (np.floating, np.float64, np.float32)):
+                val2 = float(val2)
+
+            if isinstance(val2_display, (np.integer, np.int64, np.int32)):
+                val2_display = int(val2_display)
+            elif isinstance(val2_display, (np.floating, np.float64, np.float32)):
+                val2_display = float(val2_display)
+
+            columns_info = {}
+
+            for col, minmax_data in column2_value_analysis[val2].items():
+                min_val = minmax_data["min"]
+                max_val = minmax_data["max"]
+                min_count = minmax_data["min_count"]
+                max_count = minmax_data["max_count"]
+
+                # Handle quantized float columns if needed
+                if min_val is not None and 'quantized' in col:
+                    min_val_display = round(min_val * 0.05, 2)
+                else:
+                    min_val_display = min_val
+
+                if max_val is not None and 'quantized' in col:
+                    max_val_display = round(max_val * 0.05, 2)
+                else:
+                    max_val_display = max_val
+
+                # Convert numpy types to Python native types
+                if isinstance(min_val, (np.integer, np.int64, np.int32)):
+                    min_val = int(min_val)
+                elif isinstance(min_val, (np.floating, np.float64, np.float32)) and min_val is not None:
+                    min_val = float(min_val)
+
+                if isinstance(max_val, (np.integer, np.int64, np.int32)):
+                    max_val = int(max_val)
+                elif isinstance(max_val, (np.floating, np.float64, np.float32)) and max_val is not None:
+                    max_val = float(max_val)
+
+                if isinstance(min_val_display, (np.integer, np.int64, np.int32)):
+                    min_val_display = int(min_val_display)
+                elif isinstance(min_val_display, (np.floating, np.float64, np.float32)) and min_val_display is not None:
+                    min_val_display = float(min_val_display)
+
+                if isinstance(max_val_display, (np.integer, np.int64, np.int32)):
+                    max_val_display = int(max_val_display)
+                elif isinstance(max_val_display, (np.floating, np.float64, np.float32)) and max_val_display is not None:
+                    max_val_display = float(max_val_display)
+
+                if isinstance(count, (np.integer, np.int64, np.int32)):
+                    count = int(count)
+
+                columns_info[col] = {
+                    "min": min_val_display,
+                    "max": max_val_display,
+                    "raw_min": min_val,
+                    "raw_max": max_val,
+                    "min_count": min_count,
+                    "max_count": max_count
+                }
+
+            str_val2_display = str(val2_display)
+            analysis_results["column2_value_analysis"]["values"][str_val2_display] = columns_info
 
     # Print completion message
     print(f"\n\nAnalysis complete. Saving results to {output_filename}")
