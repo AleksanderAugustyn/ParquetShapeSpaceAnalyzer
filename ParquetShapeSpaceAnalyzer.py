@@ -58,7 +58,7 @@ def main():
 
     # Get the first two non-flag columns
     non_flag_columns = [col for col in column_names if col != 'flag']
-    col1 = non_flag_columns[0] if len(non_flag_columns) > 0 else None
+    # col1 = non_flag_columns[0] if len(non_flag_columns) > 0 else None
     col2 = non_flag_columns[1] if len(non_flag_columns) > 1 else None
 
     for col in column_names:
@@ -96,7 +96,7 @@ def main():
 
         # Process column_name and get the first two non-flag columns
         non_flag_columns = [col for col in column_names if col != 'flag']
-        col1 = non_flag_columns[0] if len(non_flag_columns) > 0 else None
+        # col1 = non_flag_columns[0] if len(non_flag_columns) > 0 else None
         col2 = non_flag_columns[1] if len(non_flag_columns) > 1 else None
 
         # Process combinations of column 2 with all other columns (including col1)
