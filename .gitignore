@@ -8,5 +8,6 @@ out
 gen
 
 /ShapeFragments
+/NoNeck
 *.json
 *.png
