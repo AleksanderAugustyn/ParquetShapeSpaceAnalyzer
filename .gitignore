@@ -11,3 +11,4 @@ gen
 /NoNeck
 *.json
 *.png
+*.parquet

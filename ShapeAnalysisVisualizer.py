@@ -94,7 +94,7 @@ def create_value_count_plots(gs, data, col_names, row_start=0, display_names=Non
             counts = [item["count"] for item in col_data]
 
         # Plot the data with scaled values
-        bars = ax.bar(range(len(values)), counts, color='skyblue', edgecolor='black', linewidth=0.5)
+        ax.bar(range(len(values)), counts, color='skyblue', edgecolor='black', linewidth=0.5)
 
         # Add value labels to x-axis for small number of values
         if len(values) <= 20:
@@ -465,15 +465,15 @@ def main():
 
     # Generate visualizations based on flags
     if generate_shape:
-        shape_output = f"{base_output}_shapecheck_viz.png"
+        shape_output = f"{base_output}_ShapeCheck_Viz.png"
         visualize_data(data, shape_output, args.dpi, viz_type="shape")
 
     if generate_both:
-        both_output = f"{base_output}_both_conditions_viz.png"
+        both_output = f"{base_output}_ShapeCheckNeckCheckTrue_viz.png"
         visualize_data(data, both_output, args.dpi, viz_type="both")
 
     if generate_without_neck:
-        without_neck_output = f"{base_output}_shape_without_neck_viz.png"
+        without_neck_output = f"{base_output}_ShapeCheckNeckCheckFalse_viz.png"
         visualize_data(data, without_neck_output, args.dpi, viz_type="without_neck")
 
 
