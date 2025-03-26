@@ -9,6 +9,9 @@ gen
 
 /ShapeFragments
 /NoNeck
+/MapFragments
+/EnergyPlots
 *.json
 *.png
 *.parquet
+*.txt
