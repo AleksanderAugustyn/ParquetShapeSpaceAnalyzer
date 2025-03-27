@@ -1,6 +1,10 @@
+# --- START OF FILE ParquetEnergySpaceAnalyzer.py ---
+
 import argparse
 import math  # Needed for ceil/floor
 import os
+import re  # For sanitizing filenames
+import sys  # To exit on error
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,15 +12,19 @@ import pandas as pd
 from scipy.interpolate import griddata
 
 # --- Configuration ---
-DEFAULT_OUTPUT_DIR = '.'  # Base directory for outputs
-DEFAULT_PLOT_BASE_DIR = 'contour_plots'  # Base name for plot directories
+# DEFAULT_OUTPUT_DIR is replaced by a derived path
+DEFAULT_PLOT_BASE_DIR = 'contour_plots'  # Base name for plot directories within the main output folder
+INPUT_BASE_DIR = './MapFragments'
+OUTPUT_BASE_DIR = './MiniMaps'
 GRID_RESOLUTION = 100j  # Complex number for meshgrid density (e.g., 100x100 grid)
 INTERPOLATION_METHOD = 'cubic'  # 'linear', 'cubic', or 'nearest'
 FILLED_CONTOUR_LEVELS = 15  # Number of color levels for contourf
+MAX_EXPLICIT_CONTOUR_LINES = 100  # Max number of lines to calculate using step size
+DEFAULT_AUTO_CONTOUR_LINES = 80  # Number of lines if explicit calculation yields too many
 
 # --- Column Definitions ---
-X_AXIS_COL = 'B20'  # Fixed X-axis column
-POSSIBLE_Y_AXIS_COLS = ['B10', 'B30', 'B40', 'B50', 'B60']  # Allowed choices for Y
+X_AXIS_COL = 'B20'  # Fixed X-axis column FOR THE FIRST ANALYSIS TYPE
+POSSIBLE_Y_AXIS_COLS = ['B10', 'B30', 'B40', 'B50', 'B60']  # Allowed choices for Y (iterated in first analysis)
 ENERGY_COL = 'TotalEnergy'
 FLOAT_COLS_TO_PLOT = [
     'Mass',
@@ -32,7 +40,7 @@ FLOAT_COLS_TO_PLOT = [
     'LambdaShellNeutrons',
     'LambdaShellProtons'
 ]
-AXIS_SCALE_FACTOR = 0.05
+AXIS_SCALE_FACTOR = 0.05  # Apply scale factor for plotting axes
 
 # --- Contour Line Step Definitions ---
 CONTOUR_LINE_STEPS = {
@@ -48,40 +56,295 @@ CONTOUR_LINE_WIDTH = 0.6
 CONTOUR_LABEL_FONTSIZE = 8
 CONTOUR_LABEL_FORMAT = '%g'
 
+# --- Constants for B10 Constant Analysis ---
+B10_CONST_ANALYSIS_DIR = 'B10ConstantMaps'
+B10_CONST_FIXED_COL = 'B10'
+B10_CONST_X_COL = 'B20'
+B10_CONST_Y_COLS = ['B30', 'B40', 'B50', 'B60']  # B10 vs B20 is already done in the first analysis
 
-# --- Main Analysis Function ---
-def analyze_data(parquet_file, y_axis_col, output_dir, plot_base_dir):
-    """
-    Reads parquet, finds minimum energy rows for a given (y_axis_col, B20) combo,
-    sorts them, saves them, and generates contour plots.
-    """
-    if y_axis_col not in POSSIBLE_Y_AXIS_COLS:
-        print(f"Error: Invalid Y-axis column specified: '{y_axis_col}'. "
-              f"Choose from: {POSSIBLE_Y_AXIS_COLS}")
-        return
 
-    group_cols = [y_axis_col, X_AXIS_COL]
+# --- Helper Function: Sanitize Filename (FIXED) ---
+def sanitize_filename(name):
+    """Removes or replaces characters problematic for filenames.
+       Specifically handles negative signs to avoid collisions.
+    """
+    name_str = str(name)
+
+    # --- FIX START ---
+    # Replace hyphen with 'neg' *before* other sanitation
+    # This ensures '-29' becomes 'neg29' and '29' remains '29'
+    name_str = name_str.replace('-', 'neg')
+    # --- FIX END ---
+
+    # Replace '.' with 'p' (useful for floats)
+    name_str = name_str.replace('.', 'p')
+
+    # Remove any remaining characters that are not alphanumeric or underscore
+    # (Hyphen was already handled or doesn't exist for positive numbers)
+    name_str = re.sub(r'[^\w]+', '_', name_str)  # Removed \- from allowed set
+
+    # Remove leading/trailing underscores (hyphen removal is no longer needed here)
+    name_str = re.sub(r'^[_]+', '', name_str)
+    name_str = re.sub(r'[_]+$', '', name_str)
+
+    return name_str if name_str else "value"  # Return "value" if sanitation results in empty string
+
+
+# --- Helper Function: Generate Single Contour Plot (Filename simplified) ---
+def generate_contour_plot(
+        plot_data_df, x_col, y_col, z_col, plot_dir,
+        title_prefix="", title_suffix="", filename_suffix=""
+        # filename_suffix kept for compatibility but not used in new calls
+):
+    """
+    Generates and saves a single contour plot for the given Z column.
+    Filename is now simplified to contour_{z_col}.png when filename_suffix is empty.
+
+    Args:
+        plot_data_df (pd.DataFrame): DataFrame containing the minimum energy data for plotting.
+        x_col (str): Column name for the X-axis.
+        y_col (str): Column name for the Y-axis.
+        z_col (str): Column name for the Z-axis (the value being plotted).
+        plot_dir (str): Directory to save the plot.
+        title_prefix (str): Optional prefix for the plot title.
+        title_suffix (str): Optional suffix for the plot title.
+        filename_suffix (str): Optional suffix for the plot filename (before .png). Used for first analysis type.
+
+    Returns:
+        bool: True if plot generation succeeded, False otherwise.
+    """
+    print(f"    Generating plot for: {z_col} ({y_col} vs {x_col})...")
+
+    # Ensure necessary columns exist
+    if not all(c in plot_data_df.columns for c in [x_col, y_col, z_col]):
+        print(f"    Skipping plot for '{z_col}': Missing one or more columns ({x_col}, {y_col}, {z_col}).")
+        return False
+
+    # Prepare data, apply scaling, handle NaNs
+    plot_data = plot_data_df.dropna(subset=[x_col, y_col]).copy()
+    if plot_data.empty:
+        print(f"    Skipping '{z_col}': No data available after dropping NaNs in {x_col}/{y_col}.")
+        return False
+
+    y = plot_data[y_col] * AXIS_SCALE_FACTOR
+    x = plot_data[x_col] * AXIS_SCALE_FACTOR
+    z = plot_data[z_col]  # Z data (value being plotted)
+
+    valid_indices = ~z.isna() & ~x.isna() & ~y.isna()
+    if not valid_indices.any():
+        print(f"    Skipping '{z_col}': No valid (non-NaN) data points for plotting (X, Y, Z).")
+        return False
+
+    x_valid = x[valid_indices]
+    y_valid = y[valid_indices]
+    z_valid = z[valid_indices]
+
+    # Check if we have enough unique points for interpolation
+    if len(np.unique(x_valid)) < 2 or len(np.unique(y_valid)) < 2:
+        print(
+            f"    Skipping '{z_col}': Not enough unique X or Y points for interpolation ({len(np.unique(x_valid))} unique X, {len(np.unique(y_valid))} unique Y).")
+        return False
+    if len(x_valid) < 3 and INTERPOLATION_METHOD != 'nearest':
+        print(
+            f"    Skipping '{z_col}': Not enough data points ({len(x_valid)}) for '{INTERPOLATION_METHOD}' interpolation.")
+        return False
+
+    # Create grid
+    try:
+        y_min, y_max = y_valid.min(), y_valid.max()
+        x_min, x_max = x_valid.min(), x_valid.max()
+        if y_min == y_max or x_min == x_max:
+            print(
+                f"    Warning for '{z_col}': Data range for X ({x_col}) or Y ({y_col}) axis is zero after scaling. Cannot create interpolation grid.")
+            return False
+
+        grid_y_sparse, grid_x_sparse = np.mgrid[
+                                       y_min:y_max:GRID_RESOLUTION,
+                                       x_min:x_max:GRID_RESOLUTION
+                                       ]
+    except ValueError as ve:
+        print(f"    Error: Could not create interpolation grid for '{z_col}': {ve}. Check X/Y coordinate ranges.")
+        print(f"    Scaled Y range ({y_col}): {y_min} to {y_max}")
+        print(f"    Scaled X range ({x_col}): {x_min} to {x_max}")
+        return False
+
+    # Interpolate
+    try:
+        grid_z = griddata(
+            (y_valid, x_valid),  # Note: griddata expects points as (y, x)
+            z_valid,
+            (grid_y_sparse, grid_x_sparse),
+            method=INTERPOLATION_METHOD,
+            fill_value=np.nan  # Use NaN for points outside the convex hull
+        )
+    except Exception as e:
+        print(f"    Error during interpolation for '{z_col}': {e}")
+        return False
+
+    if np.all(np.isnan(grid_z)):
+        print(f"    Skipping '{z_col}': Interpolation resulted in all NaNs.")
+        return False
+
+    # --- Plotting ---
+    fig, ax = plt.subplots(figsize=(10, 8))
+    grid_z_masked = np.ma.masked_invalid(grid_z)  # Mask NaNs in the grid for contouring
+
+    # 1. Filled Contours
+    try:
+        # Check if there's any valid data left after masking for contourf
+        if not grid_z_masked.mask.all():
+            contour_fill = ax.contourf(
+                grid_x_sparse, grid_y_sparse, grid_z_masked,
+                levels=FILLED_CONTOUR_LEVELS, cmap='viridis', extend='both'
+            )
+            cbar = fig.colorbar(contour_fill, ax=ax)
+            cbar.set_label(z_col)
+        else:
+            print(
+                f"    Info: No valid data in the interpolated grid for {z_col} after masking. Skipping filled contour.")
+            # Still continue to potentially draw lines if they were calculated differently, although unlikely useful
+    except ValueError as ve:
+        print(f"    Error generating filled contour for {z_col}: {ve}.")
+        plt.close(fig)
+        return False
+    except Exception as e:
+        print(f"    Unexpected error during filled contour plotting for {z_col}: {e}")
+        plt.close(fig)
+        return False
+
+    # 2. Labeled Contour Lines -- REVISED LOGIC --
+    z_min_grid = np.nanmin(grid_z_masked)
+    z_max_grid = np.nanmax(grid_z_masked)
+    step = CONTOUR_LINE_STEPS.get(z_col, DEFAULT_CONTOUR_LINE_STEP)
+
+    contour_levels_arg = None  # Argument to pass to ax.contour (can be list or int)
+    should_label_contours = False  # Flag to control clabel
+
+    # Check if grid min/max are valid, distinct, and step is positive
+    if not pd.isna(z_min_grid) and not pd.isna(z_max_grid) and z_max_grid > z_min_grid and step > 0:
+        # Calculate potential start/end levels based on step
+        start_level = math.ceil(z_min_grid / step) * step
+        end_level = math.floor(z_max_grid / step) * step
+
+        if start_level <= end_level:
+            # Calculate the number of steps/intervals required
+            num_steps = int(round((end_level - start_level) / step))
+
+            # Option 1: Use EXPLICIT levels if the count is reasonable
+            if num_steps >= 0 and num_steps < MAX_EXPLICIT_CONTOUR_LINES:
+                explicit_levels = np.linspace(start_level, end_level, num_steps + 1)
+                explicit_levels = np.unique(np.round(explicit_levels, 6))  # Avoid duplicates/FP issues
+
+                if len(explicit_levels) > 1:
+                    contour_levels_arg = explicit_levels
+                    should_label_contours = True  # Label explicit levels
+                    print(f"    Using {len(contour_levels_arg)} explicit contour levels for {z_col}.")
+                else:
+                    # Only one distinct level found even within the limit
+                    print(f"    Info: Only one distinct explicit contour level calculated for {z_col}. Skipping lines.")
+                    # contour_levels_arg remains None
+
+            # Option 2: Use AUTOMATIC level count if explicit calculation yields too many
+            elif num_steps >= MAX_EXPLICIT_CONTOUR_LINES:
+                print(
+                    f"    Info: Explicit step calculation yielded too many levels ({num_steps + 1}). Using ~{DEFAULT_AUTO_CONTOUR_LINES} automatic levels for {z_col}.")
+                contour_levels_arg = DEFAULT_AUTO_CONTOUR_LINES  # Pass integer to ax.contour
+                should_label_contours = False  # Avoid labeling automatic levels for clarity
+                # If DEFAULT_AUTO_CONTOUR_LINES is 0 or 1, contour won't draw, which is fine.
+
+            # else num_steps < 0 (should not happen here)
+
+        else:
+            # start_level > end_level: Grid range is smaller than one step increment
+            print(
+                f"    Info: Grid range [{z_min_grid:.3f}, {z_max_grid:.3f}] too narrow for step {step}. Skipping contour lines for {z_col}.")
+            # contour_levels_arg remains None
+
+    else:
+        # Handle cases where range is zero, step is invalid, or min/max are NaN
+        if pd.isna(z_min_grid) or pd.isna(z_max_grid):
+            print(
+                f"    Info: Cannot determine grid data range for contour lines for {z_col} (grid min/max is NaN). Skipping lines.")
+        else:  # Range is zero or step is invalid
+            print(
+                f"    Info: Cannot determine distinct contour lines for {z_col} (grid_min={z_min_grid:.3f}, grid_max={z_max_grid:.3f}, step={step}). Skipping lines.")
+        # contour_levels_arg remains None
+
+    # --- Draw contour lines if levels were determined (either explicit list or automatic count) ---
+    if contour_levels_arg is not None:
+        try:
+            contour_lines = ax.contour(
+                grid_x_sparse, grid_y_sparse, grid_z_masked,
+                levels=contour_levels_arg,  # Pass the calculated list OR the integer count
+                colors=CONTOUR_LINE_COLOR,
+                linewidths=CONTOUR_LINE_WIDTH
+            )
+
+            # Add labels only if requested (i.e., for explicit levels)
+            if should_label_contours:
+                ax.clabel(contour_lines, inline=True,
+                          fontsize=CONTOUR_LABEL_FONTSIZE, fmt=CONTOUR_LABEL_FORMAT)
+
+        except ValueError as ve:
+            # This might happen if automatic levels fail, or levels are outside masked range
+            print(f"    Warning: Could not draw contour lines for {z_col} (levels arg: {contour_levels_arg}): {ve}")
+        except Exception as e:
+            print(f"    Warning: Unexpected error drawing contour lines for {z_col}: {e}")
+    # else: No levels were determined, message already printed above.
+
+    # Labels and Title
+    ax.set_xlabel(f'{x_col}')
+    ax.set_ylabel(f'{y_col}')
+    title = f'{title_prefix}Contour Plot of {z_col} ({y_col} vs {x_col}){title_suffix}'
+    ax.set_title(title)
+    ax.set_aspect('equal', adjustable='box')
+
+    # Save the plot - ADJUSTED FILENAME LOGIC
+    if filename_suffix:  # Use suffix if provided (for first analysis type)
+        plot_filename_base = f'contour_{z_col}{filename_suffix}.png'
+    else:  # Default to simple name otherwise (for B10 constant analysis)
+        plot_filename_base = f'contour_{z_col}.png'
+
+    plot_filename = os.path.join(plot_dir, plot_filename_base)
+    try:
+        # Ensure plot directory exists just before saving (it should, but safe)
+        os.makedirs(plot_dir, exist_ok=True)
+        plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
+    except Exception as e:
+        print(f"    Error saving plot {plot_filename}: {e}")
+        plt.close(fig)
+        return False
+
+    plt.close(fig)
+    return True
+
+
+# --- Main Analysis Function (First Type - Unchanged) ---
+def analyze_data_for_y_col(df, y_axis_col, base_output_dir):
+    """
+    Reads data, finds minimum energy rows for a given (y_axis_col, B20) combo,
+    sorts them, saves them, and generates contour plots using a helper function.
+
+    Args:
+        df (pd.DataFrame): The input DataFrame.
+        y_axis_col (str): The column name to use for the Y-axis (e.g., 'B10', 'B30').
+        base_output_dir (str): The main directory for outputs (e.g., './MiniMaps/Z_N').
+    """
+    group_cols = [y_axis_col, X_AXIS_COL]  # X_AXIS_COL is fixed 'B20' here
     output_suffix = f"{y_axis_col}_vs_{X_AXIS_COL}"
-    output_txt_file = os.path.join(output_dir, f"min_energy_{output_suffix}.txt")
-    plot_dir = os.path.join(output_dir, f"{plot_base_dir}_{output_suffix}")
+    output_txt_file = os.path.join(base_output_dir, f"min_energy_{output_suffix}.txt")
+    plot_dir = os.path.join(base_output_dir, f"{DEFAULT_PLOT_BASE_DIR}_{output_suffix}")
 
-    print(f"--- Starting Analysis for ({y_axis_col}, {X_AXIS_COL}) ---")
-    print(f"Input Parquet: {parquet_file}")
+    print(f"\n--- Starting Analysis for ({y_axis_col}, {X_AXIS_COL}) ---")
     print(f"Grouping Columns: {group_cols}")
     print(f"Output Text: {output_txt_file}")
     print(f"Plot Directory: {plot_dir}")
 
-    # --- 1. Read Parquet Data ---
-    try:
-        print(f"\n[1/4] Reading Parquet file: {parquet_file}...")
-        df = pd.read_parquet(parquet_file)
-        print(f"Successfully read {len(df)} rows.")
-    except FileNotFoundError:
-        print(f"Error: Parquet file not found at '{parquet_file}'")
-        return
-    except Exception as e:
-        print(f"Error reading Parquet file: {e}")
-        return
+    # --- 1. Data Already Read ---
+    print("\n[1/4] Using pre-loaded DataFrame...")
+    if df is None or df.empty:
+        print("Error: Input DataFrame is missing or empty.")
+        return False
 
     # --- 2. Find Minimum Energy Rows ---
     print(f"\n[2/4] Finding rows with minimum '{ENERGY_COL}' for each unique ({', '.join(group_cols)}) combination...")
@@ -90,176 +353,73 @@ def analyze_data(parquet_file, y_axis_col, output_dir, plot_base_dir):
         print(f"Error: DataFrame missing one or more required columns: {required_cols}")
         missing = [col for col in required_cols if col not in df.columns]
         print(f"Missing: {missing}")
-        return
+        return False
 
-    df_filtered = df.dropna(subset=required_cols)
+    df_filtered = df.dropna(subset=group_cols + [ENERGY_COL])
     if len(df_filtered) < len(df):
-        print(f"Dropped {len(df) - len(df_filtered)} rows with NaN values in {required_cols}")
+        print(
+            f"Dropped {len(df) - len(df_filtered)} rows with NaN values in required columns {group_cols + [ENERGY_COL]}")
     if df_filtered.empty:
         print("Error: No valid data remaining after dropping NaN in required columns.")
-        return
+        return False
 
     try:
-        idx = df_filtered.groupby(group_cols)[ENERGY_COL].idxmin()
-        min_energy_df = df_filtered.loc[idx].copy()  # Use .copy() to avoid SettingWithCopyWarning later if needed
+        idx = df_filtered.groupby(group_cols, observed=True)[ENERGY_COL].idxmin()
+        min_energy_df = df_filtered.loc[idx].copy()
         print(f"Found {len(min_energy_df)} unique ({', '.join(group_cols)}) combinations with minimum energy data.")
+        if min_energy_df.empty:
+            print("Warning: Minimum energy DataFrame is empty after grouping. No data to process or plot.")
+            return False  # Changed to False as no output is generated
+    except KeyError as ke:
+        print(f"Error during group-by minimum operation: Missing column {ke}.")
+        return False
     except Exception as e:
         print(f"Error during group-by minimum operation: {e}")
-        return
+        return False
 
     # --- 3. Sort and Save Minimum Energy Data ---
     print(f"\n[3/4] Sorting and saving minimum energy data to '{output_txt_file}'...")
     try:
-        # Sort the DataFrame before saving
+        os.makedirs(os.path.dirname(output_txt_file), exist_ok=True)
         print(f"Sorting by {X_AXIS_COL} then {y_axis_col}...")
         min_energy_df.sort_values(by=[X_AXIS_COL, y_axis_col], inplace=True)
-
-        # Save the sorted data
-        os.makedirs(os.path.dirname(output_txt_file), exist_ok=True)
         min_energy_df.to_csv(output_txt_file, sep='\t', index=False, float_format='%.6f')
         print("Data saved successfully.")
     except Exception as e:
         print(f"Error sorting or saving data to text file: {e}")
-        # Continue to plotting even if saving fails/has issues
+        # Continue to plotting, but consider this a partial success? Return True for now.
 
-    # --- 4. Generate Contour Plots ---
-    # (Plotting code remains unchanged from the previous version)
+    # --- 4. Generate Contour Plots using Helper ---
     print(f"\n[4/4] Generating contour plots in '{plot_dir}'...")
     os.makedirs(plot_dir, exist_ok=True)
-
-    plot_data = min_energy_df.dropna(subset=group_cols).copy()  # Use the already potentially modified min_energy_df
-    if plot_data.empty:
-        print("No data available for plotting after final NaN check.")
-        return
-
-    y = plot_data[y_axis_col] * AXIS_SCALE_FACTOR
-    x = plot_data[X_AXIS_COL] * AXIS_SCALE_FACTOR
-
-    try:
-        y_min, y_max = y.min(), y.max()
-        x_min, x_max = x.min(), x.max()
-        if y_min == y_max or x_min == x_max:
-            print("Warning: Data range for X or Y axis is zero. Cannot create interpolation grid.")
-            return
-
-        grid_y_sparse, grid_x_sparse = np.mgrid[
-                                       y_min:y_max:GRID_RESOLUTION,
-                                       x_min:x_max:GRID_RESOLUTION
-                                       ]
-    except ValueError as ve:
-        print(f"Error: Could not create interpolation grid: {ve}. Check X/Y coordinate ranges.")
-        print(f"Y range ({y_axis_col}): {y_min} to {y_max}")
-        print(f"X range ({X_AXIS_COL}): {x_min} to {x_max}")
-        return
 
     plots_generated = 0
     plots_failed = 0
 
+    title_suffix_main = f" ({y_axis_col} vs {X_AXIS_COL})"
+    # *** Use filename_suffix for this analysis type ***
+    filename_suffix_main = f"_{y_axis_col}_vs_{X_AXIS_COL}"
+
     for col in FLOAT_COLS_TO_PLOT:
-        if col not in plot_data.columns:
-            print(f"Skipping plot for '{col}': Column not found in minimum energy data.")
+        if col not in min_energy_df.columns:
+            print(f"    Skipping plot for '{col}': Column not found in minimum energy data.")
             plots_failed += 1
             continue
 
-        print(f"  Generating plot for: {col}...")
-        z = plot_data[col].copy()
-        valid_indices = ~z.isna() & ~x.isna() & ~y.isna()
-
-        if not valid_indices.any():
-            print(f"    Skipping '{col}': No valid (non-NaN) data points for plotting.")
-            plots_failed += 1
-            continue
-
-        x_valid = x[valid_indices]
-        y_valid = y[valid_indices]
-        z_valid = z[valid_indices]
-
-        try:
-            grid_z = griddata(
-                (y_valid, x_valid),
-                z_valid,
-                (grid_y_sparse, grid_x_sparse),
-                method=INTERPOLATION_METHOD
-            )
-        except Exception as e:
-            print(f"    Error during interpolation for '{col}': {e}")
-            plots_failed += 1
-            continue
-
-        if np.all(np.isnan(grid_z)):
-            print(f"    Skipping '{col}': Interpolation resulted in all NaNs.")
-            plots_failed += 1
-            continue
-
-        # --- Plotting ---
-        fig, ax = plt.subplots(figsize=(10, 8))
-        grid_z_masked = np.ma.masked_invalid(grid_z)
-
-        # 1. Filled Contours
-        contour_fill = ax.contourf(
-            grid_x_sparse, grid_y_sparse, grid_z_masked,
-            levels=FILLED_CONTOUR_LEVELS, cmap='viridis'
+        # Call the helper function
+        success = generate_contour_plot(
+            plot_data_df=min_energy_df,
+            x_col=X_AXIS_COL,
+            y_col=y_axis_col,
+            z_col=col,
+            plot_dir=plot_dir,
+            title_suffix=title_suffix_main,
+            filename_suffix=filename_suffix_main  # Pass suffix here
         )
-        cbar = fig.colorbar(contour_fill, ax=ax)
-        cbar.set_label(col)
-
-        # 2. Labeled Contour Lines
-        z_min = np.nanmin(grid_z)
-        z_max = np.nanmax(grid_z)
-        step = CONTOUR_LINE_STEPS.get(col, DEFAULT_CONTOUR_LINE_STEP)
-
-        if not np.isnan(z_min) and not np.isnan(z_max) and z_max > z_min:
-            start_level = math.floor(z_min / step) * step
-            while start_level < z_min: start_level += step
-            end_level = math.ceil(z_max / step) * step
-            while end_level > z_max: end_level -= step
-
-            num_steps = int(round((end_level - start_level) / step)) if step > 0 else 0
-            if num_steps >= 0 and num_steps < 1000:
-                contour_line_levels = np.linspace(start_level, end_level, num_steps + 1)
-            elif num_steps >= 1000:
-                contour_line_levels = []
-                print(f"    Warning: Too many contour lines requested ({num_steps + 1}) for {col}. Skipping.")
-            else:
-                contour_line_levels = []
-
-            contour_line_levels = np.unique(contour_line_levels)
-
-            if len(contour_line_levels) > 1:
-                try:
-                    contour_lines = ax.contour(
-                        grid_x_sparse, grid_y_sparse, grid_z_masked,
-                        levels=contour_line_levels, colors=CONTOUR_LINE_COLOR,
-                        linewidths=CONTOUR_LINE_WIDTH
-                    )
-                    ax.clabel(contour_lines, inline=True,
-                              fontsize=CONTOUR_LABEL_FONTSIZE, fmt=CONTOUR_LABEL_FORMAT
-                              )
-                except Exception as e:
-                    print(f"    Warning: Could not draw/label contour lines for {col}: {e}")
-            elif len(contour_line_levels) <= 1 and num_steps >= 0:
-                print(
-                    f"    Info: Not enough distinct contour levels ({len(contour_line_levels)}) to draw for {col} in range [{z_min:.3f}, {z_max:.3f}] with step {step}.")
-
-        elif not (np.isnan(z_min) or np.isnan(z_max)):
-            print(f"    Info: Cannot determine distinct contour lines for {col} (min={z_min}, max={z_max}). Skipping.")
-
-        # Labels and Title
-        ax.set_xlabel(f'{X_AXIS_COL}')
-        ax.set_ylabel(f'{y_axis_col}')
-        ax.set_title(f'Contour Plot of {col} ({y_axis_col} vs {X_AXIS_COL})')
-        ax.set_aspect('equal', adjustable='box')
-
-        # Save the plot
-        plot_filename = os.path.join(plot_dir, f'contour_{col}.png')
-        try:
-            plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
+        if success:
             plots_generated += 1
-        except Exception as e:
-            print(f"    Error saving plot {plot_filename}: {e}")
+        else:
             plots_failed += 1
-
-        plt.close(fig)
     # --- End of Plotting Loop ---
 
     print(f"\n--- Plotting Summary for ({y_axis_col}, {X_AXIS_COL}) ---")
@@ -267,34 +427,234 @@ def analyze_data(parquet_file, y_axis_col, output_dir, plot_base_dir):
     print(f"Failed or skipped:    {plots_failed} plots")
     print(f"Plots saved in directory: '{plot_dir}'")
     print(f"--- Analysis Complete for ({y_axis_col}, {X_AXIS_COL}) ---")
+    return True  # Indicate overall success if we reached here
 
 
-# --- Command Line Argument Parsing ---
+# --- NEW Analysis Function: B10 Constant (MODIFIED for Subdirs) ---
+def analyze_constant_b10(full_df, base_output_dir_zn):
+    """
+    Generates contour plots for B20 vs (B30..B60) keeping B10 constant.
+    Organizes plots into subdirectories: B10ConstantMaps/B10_value/YCol_vs_XCol/.
+
+    Args:
+        full_df (pd.DataFrame): The complete input DataFrame for Z, N.
+        base_output_dir_zn (str): The base output directory for the Z, N combination (e.g., './MiniMaps/Z_N').
+    """
+    print(f"\n{'=' * 10} Starting B10 Constant Analysis {'=' * 10}")
+    b10_const_base_path = os.path.join(base_output_dir_zn, B10_CONST_ANALYSIS_DIR)
+
+    # Check required columns in the full dataframe
+    required_cols_for_analysis = [B10_CONST_FIXED_COL, B10_CONST_X_COL,
+                                  ENERGY_COL] + B10_CONST_Y_COLS + FLOAT_COLS_TO_PLOT
+    missing_cols = [col for col in required_cols_for_analysis if col not in full_df.columns]
+    if missing_cols:
+        print(f"Error: Cannot perform B10 Constant analysis. DataFrame is missing required columns: {missing_cols}")
+        return False  # Indicate failure of this analysis section
+
+    # Find unique B10 values, dropping NaNs
+    unique_b10_values = full_df[B10_CONST_FIXED_COL].dropna().unique()
+    unique_b10_values.sort()  # Process in a consistent order
+
+    if len(unique_b10_values) == 0:
+        print(
+            f"Warning: No valid (non-NaN) values found for the constant column '{B10_CONST_FIXED_COL}'. Skipping B10 Constant analysis.")
+        return True  # Not an error, just no data to process
+
+    print(f"Found {len(unique_b10_values)} unique values for {B10_CONST_FIXED_COL}.")
+    os.makedirs(b10_const_base_path, exist_ok=True)
+    print(f"Base directory for this analysis: {b10_const_base_path}")
+
+    overall_success = True
+    processed_b10_count = 0
+
+    # --- Loop over each unique B10 value ---
+    for b10_val in unique_b10_values:
+        # Sanitize b10_val for directory name
+        b10_val_str_safe = sanitize_filename(b10_val)
+        b10_subdir_name = f"{B10_CONST_FIXED_COL}_{b10_val_str_safe}"
+        # Base directory for THIS specific B10 value
+        b10_specific_base_dir = os.path.join(b10_const_base_path, b10_subdir_name)
+        os.makedirs(b10_specific_base_dir, exist_ok=True)  # Create B10_value directory
+
+        print(f"\n--- Analyzing for constant {B10_CONST_FIXED_COL} = {b10_val} ---")
+        print(f"Base output dir for this value: {b10_specific_base_dir}")
+
+        # Filter data for the current B10 value
+        df_b10_filtered = full_df[full_df[B10_CONST_FIXED_COL] == b10_val].copy()
+        if df_b10_filtered.empty:
+            print("  No data found for this B10 value. Skipping.")
+            continue  # Skip to next B10 value
+
+        processed_b10_count += 1
+        b10_level_plots_generated = 0
+        b10_level_plots_failed = 0
+
+        # --- Loop through the Y-axis columns for this B10 value (B30, B40, etc.) ---
+        for y_col in B10_CONST_Y_COLS:
+            print(f"  -- Processing Y-axis: {y_col} (X-axis: {B10_CONST_X_COL}) --")
+
+            # *** Define and create the specific subdirectory for this Y vs X plot ***
+            plot_subdir_name = f"{y_col}_vs_{B10_CONST_X_COL}"
+            specific_plot_dir = os.path.join(b10_specific_base_dir, plot_subdir_name)
+            os.makedirs(specific_plot_dir, exist_ok=True)  # Create YCol_vs_XCol directory
+            print(f"    Outputting plots to: {specific_plot_dir}")
+
+            # Define grouping columns for minimum energy search within this B10 subset
+            group_cols = [y_col, B10_CONST_X_COL]
+            required_cols = group_cols + [ENERGY_COL]  # Check these exist in the subset
+
+            # Ensure required cols for this specific plot exist (redundant check, but safe)
+            if not all(c in df_b10_filtered.columns for c in required_cols):
+                print(
+                    f"    Skipping {y_col}: Missing required columns {required_cols} in data subset for B10={b10_val}.")
+                continue  # Skip to next y_col
+
+            # Find minimum energy within the B10 subset for each (y_col, B20) pair
+            df_subset_filtered = df_b10_filtered.dropna(subset=group_cols + [ENERGY_COL])
+            if df_subset_filtered.empty:
+                print(f"    Skipping {y_col}: No valid data after dropping NaNs in {group_cols + [ENERGY_COL]}.")
+                continue  # Skip to next y_col
+
+            try:
+                idx = df_subset_filtered.groupby(group_cols, observed=True)[ENERGY_COL].idxmin()
+                min_energy_subset_df = df_subset_filtered.loc[idx].copy()
+                print(
+                    f"    Found {len(min_energy_subset_df)} min energy points for ({y_col}, {B10_CONST_X_COL}) at {B10_CONST_FIXED_COL}={b10_val}.")
+                if min_energy_subset_df.empty:
+                    print("    Warning: Minimum energy DataFrame is empty for this combination. Skipping plots.")
+                    continue  # Skip plotting for this y_col
+            except KeyError as ke:
+                print(
+                    f"    Error finding minimum energy for {y_col} vs {B10_CONST_X_COL} at {B10_CONST_FIXED_COL}={b10_val}: Missing column {ke}")
+                overall_success = False
+                continue  # Skip to next y_col
+            except Exception as e:
+                print(
+                    f"    Error finding minimum energy for {y_col} vs {B10_CONST_X_COL} at {B10_CONST_FIXED_COL}={b10_val}: {e}")
+                overall_success = False
+                continue  # Skip to next y_col
+
+            # --- Generate plots for this (B10_val, y_col) combination ---
+            title_suffix_b10 = f" ({y_col} vs {B10_CONST_X_COL}) for {B10_CONST_FIXED_COL}={b10_val}"
+            # *** No filename suffix needed here, directory structure provides context ***
+
+            for z_col_to_plot in FLOAT_COLS_TO_PLOT:
+                if z_col_to_plot not in min_energy_subset_df.columns:
+                    print(
+                        f"    Skipping plot for '{z_col_to_plot}': Column not found in B10-specific minimum energy data.")
+                    b10_level_plots_failed += 1
+                    continue
+
+                # *** Call plot helper with the NEW specific_plot_dir and NO filename_suffix ***
+                success = generate_contour_plot(
+                    plot_data_df=min_energy_subset_df,
+                    x_col=B10_CONST_X_COL,
+                    y_col=y_col,
+                    z_col=z_col_to_plot,
+                    plot_dir=specific_plot_dir,  # Use the YCol_vs_XCol directory
+                    title_suffix=title_suffix_b10,
+                    filename_suffix=""  # Explicitly empty
+                )
+                if success:
+                    b10_level_plots_generated += 1
+                else:
+                    b10_level_plots_failed += 1
+                    overall_success = False  # Mark overall analysis as partially failed if any plot fails
+
+        # --- End of y_col loop ---
+        print(f"--- Plotting Summary for {B10_CONST_FIXED_COL} = {b10_val} ---")
+        print(f"  Successfully generated: {b10_level_plots_generated} plots")
+        print(f"  Failed or skipped:    {b10_level_plots_failed} plots")
+
+    # --- End of b10_val loop ---
+    print(f"\nProcessed {processed_b10_count} unique {B10_CONST_FIXED_COL} values.")
+    print(f"{'=' * 10} B10 Constant Analysis Complete {'=' * 10}")
+    return overall_success
+
+
+# --- Command Line Argument Parsing and Main Execution (Unchanged) ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Analyze Parquet file: find min energy points for a (Y_COL, B20) combination and create contour plots.'
+        description='Analyze Parquet fragment: find min energy points for (Bxx, B20) combinations, '
+                    'create contour plots, and perform B10-constant analysis.'
     )
     parser.add_argument(
-        'parquet_file',
-        help='Path to the input Parquet file.'
+        'NumberOfProtons',
+        type=int,
+        help='Number of Protons (Z).'
     )
     parser.add_argument(
-        '--y-col',
-        required=True,
-        choices=POSSIBLE_Y_AXIS_COLS,
-        help='Which B column (B10, B30, B40, B50, B60) to use for the Y-axis and grouping with B20.'
-    )
-    parser.add_argument(
-        '-o', '--output-dir',
-        default=DEFAULT_OUTPUT_DIR,
-        help=f'Base directory to save the output text file (default: current directory "{DEFAULT_OUTPUT_DIR}")'
-    )
-    parser.add_argument(
-        '-p', '--plot-basedir',
-        default=DEFAULT_PLOT_BASE_DIR,
-        help=f'Base name for the plot directory (suffixed with Y_COL_vs_B20) (default: "{DEFAULT_PLOT_BASE_DIR}")'
+        'NumberOfNeutrons',
+        type=int,
+        help='Number of Neutrons (N).'
     )
 
     args = parser.parse_args()
 
-    analyze_data(args.parquet_file, args.y_col, args.output_dir, args.plot_basedir)
+    z = args.NumberOfProtons
+    n = args.NumberOfNeutrons
+
+    # Derive input and output paths
+    input_filename = f"{z}_{n}_AllMapFragments.parquet"
+    parquet_file_path = os.path.join(INPUT_BASE_DIR, input_filename)
+    output_directory_zn = os.path.join(OUTPUT_BASE_DIR, f"{z}_{n}")  # Specific dir for this Z, N
+
+    print(f"=== Starting Full Analysis for Z={z}, N={n} ===")
+    print(f"Derived Input File: {parquet_file_path}")
+    print(f"Derived Base Output Directory: {output_directory_zn}")
+
+    # Create the base output directory for this Z, N combination
+    try:
+        os.makedirs(output_directory_zn, exist_ok=True)
+        print(f"Ensured base output directory exists: {output_directory_zn}")
+    except OSError as e:
+        print(f"Error: Could not create base output directory '{output_directory_zn}': {e}")
+        sys.exit(1)
+
+    # --- Read Parquet Data ONCE ---
+    full_dataframe = None
+    try:
+        print(f"\nReading Parquet file: {parquet_file_path}...")
+        if not os.path.exists(parquet_file_path):
+            print(f"Error: Input Parquet file not found at '{parquet_file_path}'")
+            print("Please ensure the file exists in the correct MapFragments directory.")
+            sys.exit(1)
+        full_dataframe = pd.read_parquet(parquet_file_path)
+        print(f"Successfully read {len(full_dataframe)} rows.")
+    except Exception as e:
+        print(f"Error reading Parquet file '{parquet_file_path}': {e}")
+        sys.exit(1)
+
+    # --- Run First Analysis Type (Y vs B20) ---
+    print(f"\n=== Starting Y-Axis vs {X_AXIS_COL} Analysis ===")
+    y_vs_b20_success_count = 0
+    y_vs_b20_failure_count = 0
+    for y_col in POSSIBLE_Y_AXIS_COLS:
+        success = analyze_data_for_y_col(full_dataframe, y_col, output_directory_zn)
+        if success:
+            y_vs_b20_success_count += 1
+        else:
+            y_vs_b20_failure_count += 1
+        print("-" * 50)  # Separator
+
+    # --- Run Second Analysis Type (B10 Constant) ---
+    b10_const_analysis_success = analyze_constant_b10(full_dataframe, output_directory_zn)
+
+    # --- Final Summary ---
+    print(f"\n=== Full Analysis Summary for Z={z}, N={n} ===")
+    print("\n--- Y-Axis vs B20 Analysis Summary ---")
+    print(f"Processed {len(POSSIBLE_Y_AXIS_COLS)} Y-axis columns ({', '.join(POSSIBLE_Y_AXIS_COLS)}).")
+    print(f"Successful analyses: {y_vs_b20_success_count}")
+    print(f"Failed analyses:     {y_vs_b20_failure_count}")
+
+    print("\n--- B10 Constant Analysis Summary ---")
+    if b10_const_analysis_success is False:  # Check specifically for False, as True means it ran (even if some plots failed within)
+        print("B10 Constant analysis encountered errors during execution.")
+    elif b10_const_analysis_success is True:
+        print("B10 Constant analysis completed (check logs for details on individual plots/values).")
+    # If the function returned None (e.g., due to missing columns), it wouldn't print success/failure here.
+
+    print(f"\nAll outputs located in base directory: '{output_directory_zn}'")
+    print("==============================================")
+
+# --- END OF FILE ParquetEnergySpaceAnalyzer.py ---
