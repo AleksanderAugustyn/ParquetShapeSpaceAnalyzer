@@ -76,11 +76,11 @@ def sanitize_filename(name):
     name_str = name_str.replace('.', 'p')
 
     # Remove any remaining characters that are not alphanumeric or underscore
-    name_str = re.sub(r'[^\w]+', '_', name_str)
+    name_str = re.sub(r'\W+', '_', name_str)
 
     # Remove leading/trailing underscores
-    name_str = re.sub(r'^[_]+', '', name_str)
-    name_str = re.sub(r'[_]+$', '', name_str)
+    name_str = re.sub(r'^_+', '', name_str)
+    name_str = re.sub(r'_+$', '', name_str)
 
     return name_str if name_str else "value"  # Return "value" if sanitation results in empty string
 
