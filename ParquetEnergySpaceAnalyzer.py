@@ -1,5 +1,3 @@
-# --- START OF FILE ParquetEnergySpaceAnalyzer.py ---
-
 import argparse
 import math  # Needed for ceil/floor
 import os
@@ -70,35 +68,31 @@ def sanitize_filename(name):
     """
     name_str = str(name)
 
-    # --- FIX START ---
     # Replace hyphen with 'neg' *before* other sanitation
     # This ensures '-29' becomes 'neg29' and '29' remains '29'
     name_str = name_str.replace('-', 'neg')
-    # --- FIX END ---
 
     # Replace '.' with 'p' (useful for floats)
     name_str = name_str.replace('.', 'p')
 
     # Remove any remaining characters that are not alphanumeric or underscore
-    # (Hyphen was already handled or doesn't exist for positive numbers)
-    name_str = re.sub(r'[^\w]+', '_', name_str)  # Removed \- from allowed set
+    name_str = re.sub(r'[^\w]+', '_', name_str)
 
-    # Remove leading/trailing underscores (hyphen removal is no longer needed here)
+    # Remove leading/trailing underscores
     name_str = re.sub(r'^[_]+', '', name_str)
     name_str = re.sub(r'[_]+$', '', name_str)
 
     return name_str if name_str else "value"  # Return "value" if sanitation results in empty string
 
 
-# --- Helper Function: Generate Single Contour Plot (Filename simplified) ---
+# --- Helper Function: Generate Single Contour Plot (Filename construction modified) ---
 def generate_contour_plot(
         plot_data_df, x_col, y_col, z_col, plot_dir,
         title_prefix="", title_suffix="", filename_suffix=""
-        # filename_suffix kept for compatibility but not used in new calls
 ):
     """
     Generates and saves a single contour plot for the given Z column.
-    Filename is now simplified to contour_{z_col}.png when filename_suffix is empty.
+    Filename construction uses the provided filename_suffix. If empty, defaults to contour_{z_col}.png.
 
     Args:
         plot_data_df (pd.DataFrame): DataFrame containing the minimum energy data for plotting.
@@ -108,7 +102,7 @@ def generate_contour_plot(
         plot_dir (str): Directory to save the plot.
         title_prefix (str): Optional prefix for the plot title.
         title_suffix (str): Optional suffix for the plot title.
-        filename_suffix (str): Optional suffix for the plot filename (before .png). Used for first analysis type.
+        filename_suffix (str): Optional suffix for the plot filename (before .png), used to add context like constant values.
 
     Returns:
         bool: True if plot generation succeeded, False otherwise.
@@ -202,7 +196,6 @@ def generate_contour_plot(
         else:
             print(
                 f"    Info: No valid data in the interpolated grid for {z_col} after masking. Skipping filled contour.")
-            # Still continue to potentially draw lines if they were calculated differently, although unlikely useful
     except ValueError as ve:
         print(f"    Error generating filled contour for {z_col}: {ve}.")
         plt.close(fig)
@@ -217,80 +210,57 @@ def generate_contour_plot(
     z_max_grid = np.nanmax(grid_z_masked)
     step = CONTOUR_LINE_STEPS.get(z_col, DEFAULT_CONTOUR_LINE_STEP)
 
-    contour_levels_arg = None  # Argument to pass to ax.contour (can be list or int)
-    should_label_contours = False  # Flag to control clabel
+    contour_levels_arg = None
+    should_label_contours = False
 
-    # Check if grid min/max are valid, distinct, and step is positive
     if not pd.isna(z_min_grid) and not pd.isna(z_max_grid) and z_max_grid > z_min_grid and step > 0:
-        # Calculate potential start/end levels based on step
         start_level = math.ceil(z_min_grid / step) * step
         end_level = math.floor(z_max_grid / step) * step
 
         if start_level <= end_level:
-            # Calculate the number of steps/intervals required
             num_steps = int(round((end_level - start_level) / step))
 
-            # Option 1: Use EXPLICIT levels if the count is reasonable
             if num_steps >= 0 and num_steps < MAX_EXPLICIT_CONTOUR_LINES:
                 explicit_levels = np.linspace(start_level, end_level, num_steps + 1)
-                explicit_levels = np.unique(np.round(explicit_levels, 6))  # Avoid duplicates/FP issues
+                explicit_levels = np.unique(np.round(explicit_levels, 6))
 
                 if len(explicit_levels) > 1:
                     contour_levels_arg = explicit_levels
-                    should_label_contours = True  # Label explicit levels
+                    should_label_contours = True
                     print(f"    Using {len(contour_levels_arg)} explicit contour levels for {z_col}.")
                 else:
-                    # Only one distinct level found even within the limit
                     print(f"    Info: Only one distinct explicit contour level calculated for {z_col}. Skipping lines.")
-                    # contour_levels_arg remains None
-
-            # Option 2: Use AUTOMATIC level count if explicit calculation yields too many
             elif num_steps >= MAX_EXPLICIT_CONTOUR_LINES:
                 print(
                     f"    Info: Explicit step calculation yielded too many levels ({num_steps + 1}). Using ~{DEFAULT_AUTO_CONTOUR_LINES} automatic levels for {z_col}.")
-                contour_levels_arg = DEFAULT_AUTO_CONTOUR_LINES  # Pass integer to ax.contour
-                should_label_contours = False  # Avoid labeling automatic levels for clarity
-                # If DEFAULT_AUTO_CONTOUR_LINES is 0 or 1, contour won't draw, which is fine.
-
-            # else num_steps < 0 (should not happen here)
-
+                contour_levels_arg = DEFAULT_AUTO_CONTOUR_LINES
+                should_label_contours = False
         else:
-            # start_level > end_level: Grid range is smaller than one step increment
             print(
                 f"    Info: Grid range [{z_min_grid:.3f}, {z_max_grid:.3f}] too narrow for step {step}. Skipping contour lines for {z_col}.")
-            # contour_levels_arg remains None
-
     else:
-        # Handle cases where range is zero, step is invalid, or min/max are NaN
         if pd.isna(z_min_grid) or pd.isna(z_max_grid):
             print(
                 f"    Info: Cannot determine grid data range for contour lines for {z_col} (grid min/max is NaN). Skipping lines.")
-        else:  # Range is zero or step is invalid
+        else:
             print(
                 f"    Info: Cannot determine distinct contour lines for {z_col} (grid_min={z_min_grid:.3f}, grid_max={z_max_grid:.3f}, step={step}). Skipping lines.")
-        # contour_levels_arg remains None
 
-    # --- Draw contour lines if levels were determined (either explicit list or automatic count) ---
     if contour_levels_arg is not None:
         try:
             contour_lines = ax.contour(
                 grid_x_sparse, grid_y_sparse, grid_z_masked,
-                levels=contour_levels_arg,  # Pass the calculated list OR the integer count
+                levels=contour_levels_arg,
                 colors=CONTOUR_LINE_COLOR,
                 linewidths=CONTOUR_LINE_WIDTH
             )
-
-            # Add labels only if requested (i.e., for explicit levels)
             if should_label_contours:
                 ax.clabel(contour_lines, inline=True,
                           fontsize=CONTOUR_LABEL_FONTSIZE, fmt=CONTOUR_LABEL_FORMAT)
-
         except ValueError as ve:
-            # This might happen if automatic levels fail, or levels are outside masked range
             print(f"    Warning: Could not draw contour lines for {z_col} (levels arg: {contour_levels_arg}): {ve}")
         except Exception as e:
             print(f"    Warning: Unexpected error drawing contour lines for {z_col}: {e}")
-    # else: No levels were determined, message already printed above.
 
     # Labels and Title
     ax.set_xlabel(f'{x_col}')
@@ -299,15 +269,15 @@ def generate_contour_plot(
     ax.set_title(title)
     ax.set_aspect('equal', adjustable='box')
 
-    # Save the plot - ADJUSTED FILENAME LOGIC
-    if filename_suffix:  # Use suffix if provided (for first analysis type)
+    # Save the plot - Use filename_suffix if provided
+    if filename_suffix:
+        # Ensure suffix starts appropriately, e.g., with '_' if desired by caller
         plot_filename_base = f'contour_{z_col}{filename_suffix}.png'
-    else:  # Default to simple name otherwise (for B10 constant analysis)
+    else:
         plot_filename_base = f'contour_{z_col}.png'
 
     plot_filename = os.path.join(plot_dir, plot_filename_base)
     try:
-        # Ensure plot directory exists just before saving (it should, but safe)
         os.makedirs(plot_dir, exist_ok=True)
         plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
     except Exception as e:
@@ -369,7 +339,7 @@ def analyze_data_for_y_col(df, y_axis_col, base_output_dir):
         print(f"Found {len(min_energy_df)} unique ({', '.join(group_cols)}) combinations with minimum energy data.")
         if min_energy_df.empty:
             print("Warning: Minimum energy DataFrame is empty after grouping. No data to process or plot.")
-            return False  # Changed to False as no output is generated
+            return False
     except KeyError as ke:
         print(f"Error during group-by minimum operation: Missing column {ke}.")
         return False
@@ -387,7 +357,7 @@ def analyze_data_for_y_col(df, y_axis_col, base_output_dir):
         print("Data saved successfully.")
     except Exception as e:
         print(f"Error sorting or saving data to text file: {e}")
-        # Continue to plotting, but consider this a partial success? Return True for now.
+
 
     # --- 4. Generate Contour Plots using Helper ---
     print(f"\n[4/4] Generating contour plots in '{plot_dir}'...")
@@ -397,8 +367,8 @@ def analyze_data_for_y_col(df, y_axis_col, base_output_dir):
     plots_failed = 0
 
     title_suffix_main = f" ({y_axis_col} vs {X_AXIS_COL})"
-    # *** Use filename_suffix for this analysis type ***
-    filename_suffix_main = f"_{y_axis_col}_vs_{X_AXIS_COL}"
+    # *** Use filename_suffix for this analysis type to distinguish plots from different Y-axes ***
+    filename_suffix_main = f"_{y_axis_col}_vs_{X_AXIS_COL}"  # e.g., _B10_vs_B20
 
     for col in FLOAT_COLS_TO_PLOT:
         if col not in min_energy_df.columns:
@@ -420,21 +390,21 @@ def analyze_data_for_y_col(df, y_axis_col, base_output_dir):
             plots_generated += 1
         else:
             plots_failed += 1
-    # --- End of Plotting Loop ---
 
     print(f"\n--- Plotting Summary for ({y_axis_col}, {X_AXIS_COL}) ---")
     print(f"Successfully generated: {plots_generated} plots")
     print(f"Failed or skipped:    {plots_failed} plots")
     print(f"Plots saved in directory: '{plot_dir}'")
     print(f"--- Analysis Complete for ({y_axis_col}, {X_AXIS_COL}) ---")
-    return True  # Indicate overall success if we reached here
+    return True
 
 
-# --- NEW Analysis Function: B10 Constant (MODIFIED for Subdirs) ---
+# --- NEW Analysis Function: B10 Constant (MODIFIED for Filenames) ---
 def analyze_constant_b10(full_df, base_output_dir_zn):
     """
     Generates contour plots for B20 vs (B30..B60) keeping B10 constant.
     Organizes plots into subdirectories: B10ConstantMaps/B10_value/YCol_vs_XCol/.
+    Filenames now include the B10 value: contour_{Zcol}_{B10col}_{B10val}.png
 
     Args:
         full_df (pd.DataFrame): The complete input DataFrame for Z, N.
@@ -449,16 +419,16 @@ def analyze_constant_b10(full_df, base_output_dir_zn):
     missing_cols = [col for col in required_cols_for_analysis if col not in full_df.columns]
     if missing_cols:
         print(f"Error: Cannot perform B10 Constant analysis. DataFrame is missing required columns: {missing_cols}")
-        return False  # Indicate failure of this analysis section
+        return False
 
     # Find unique B10 values, dropping NaNs
     unique_b10_values = full_df[B10_CONST_FIXED_COL].dropna().unique()
-    unique_b10_values.sort()  # Process in a consistent order
+    unique_b10_values.sort()
 
     if len(unique_b10_values) == 0:
         print(
             f"Warning: No valid (non-NaN) values found for the constant column '{B10_CONST_FIXED_COL}'. Skipping B10 Constant analysis.")
-        return True  # Not an error, just no data to process
+        return True
 
     print(f"Found {len(unique_b10_values)} unique values for {B10_CONST_FIXED_COL}.")
     os.makedirs(b10_const_base_path, exist_ok=True)
@@ -469,12 +439,12 @@ def analyze_constant_b10(full_df, base_output_dir_zn):
 
     # --- Loop over each unique B10 value ---
     for b10_val in unique_b10_values:
-        # Sanitize b10_val for directory name
+        # Sanitize b10_val for directory AND filename component
         b10_val_str_safe = sanitize_filename(b10_val)
-        b10_subdir_name = f"{B10_CONST_FIXED_COL}_{b10_val_str_safe}"
+        b10_subdir_name = f"{B10_CONST_FIXED_COL}_{b10_val_str_safe}"  # e.g., B10_1p5
         # Base directory for THIS specific B10 value
         b10_specific_base_dir = os.path.join(b10_const_base_path, b10_subdir_name)
-        os.makedirs(b10_specific_base_dir, exist_ok=True)  # Create B10_value directory
+        os.makedirs(b10_specific_base_dir, exist_ok=True)
 
         print(f"\n--- Analyzing for constant {B10_CONST_FIXED_COL} = {b10_val} ---")
         print(f"Base output dir for this value: {b10_specific_base_dir}")
@@ -483,7 +453,7 @@ def analyze_constant_b10(full_df, base_output_dir_zn):
         df_b10_filtered = full_df[full_df[B10_CONST_FIXED_COL] == b10_val].copy()
         if df_b10_filtered.empty:
             print("  No data found for this B10 value. Skipping.")
-            continue  # Skip to next B10 value
+            continue
 
         processed_b10_count += 1
         b10_level_plots_generated = 0
@@ -496,24 +466,23 @@ def analyze_constant_b10(full_df, base_output_dir_zn):
             # *** Define and create the specific subdirectory for this Y vs X plot ***
             plot_subdir_name = f"{y_col}_vs_{B10_CONST_X_COL}"
             specific_plot_dir = os.path.join(b10_specific_base_dir, plot_subdir_name)
-            os.makedirs(specific_plot_dir, exist_ok=True)  # Create YCol_vs_XCol directory
+            os.makedirs(specific_plot_dir, exist_ok=True)
             print(f"    Outputting plots to: {specific_plot_dir}")
 
             # Define grouping columns for minimum energy search within this B10 subset
             group_cols = [y_col, B10_CONST_X_COL]
-            required_cols = group_cols + [ENERGY_COL]  # Check these exist in the subset
+            required_cols = group_cols + [ENERGY_COL]
 
-            # Ensure required cols for this specific plot exist (redundant check, but safe)
             if not all(c in df_b10_filtered.columns for c in required_cols):
                 print(
                     f"    Skipping {y_col}: Missing required columns {required_cols} in data subset for B10={b10_val}.")
-                continue  # Skip to next y_col
+                continue
 
             # Find minimum energy within the B10 subset for each (y_col, B20) pair
             df_subset_filtered = df_b10_filtered.dropna(subset=group_cols + [ENERGY_COL])
             if df_subset_filtered.empty:
                 print(f"    Skipping {y_col}: No valid data after dropping NaNs in {group_cols + [ENERGY_COL]}.")
-                continue  # Skip to next y_col
+                continue
 
             try:
                 idx = df_subset_filtered.groupby(group_cols, observed=True)[ENERGY_COL].idxmin()
@@ -522,21 +491,25 @@ def analyze_constant_b10(full_df, base_output_dir_zn):
                     f"    Found {len(min_energy_subset_df)} min energy points for ({y_col}, {B10_CONST_X_COL}) at {B10_CONST_FIXED_COL}={b10_val}.")
                 if min_energy_subset_df.empty:
                     print("    Warning: Minimum energy DataFrame is empty for this combination. Skipping plots.")
-                    continue  # Skip plotting for this y_col
+                    continue
             except KeyError as ke:
                 print(
                     f"    Error finding minimum energy for {y_col} vs {B10_CONST_X_COL} at {B10_CONST_FIXED_COL}={b10_val}: Missing column {ke}")
                 overall_success = False
-                continue  # Skip to next y_col
+                continue
             except Exception as e:
                 print(
                     f"    Error finding minimum energy for {y_col} vs {B10_CONST_X_COL} at {B10_CONST_FIXED_COL}={b10_val}: {e}")
                 overall_success = False
-                continue  # Skip to next y_col
+                continue
 
             # --- Generate plots for this (B10_val, y_col) combination ---
             title_suffix_b10 = f" ({y_col} vs {B10_CONST_X_COL}) for {B10_CONST_FIXED_COL}={b10_val}"
-            # *** No filename suffix needed here, directory structure provides context ***
+
+            # *** MODIFICATION: Create the filename suffix containing the B10 value ***
+            # Format: _{B10_CONST_FIXED_COL}_{b10_val_str_safe}
+            # Example: _B10_1p5 or _B10_neg2p0
+            filename_suffix_b10 = f"_{B10_CONST_FIXED_COL}_{b10_val_str_safe}"
 
             for z_col_to_plot in FLOAT_COLS_TO_PLOT:
                 if z_col_to_plot not in min_energy_subset_df.columns:
@@ -545,7 +518,7 @@ def analyze_constant_b10(full_df, base_output_dir_zn):
                     b10_level_plots_failed += 1
                     continue
 
-                # *** Call plot helper with the NEW specific_plot_dir and NO filename_suffix ***
+                # *** Call plot helper with the NEW specific_plot_dir AND the NEW filename_suffix ***
                 success = generate_contour_plot(
                     plot_data_df=min_energy_subset_df,
                     x_col=B10_CONST_X_COL,
@@ -553,13 +526,13 @@ def analyze_constant_b10(full_df, base_output_dir_zn):
                     z_col=z_col_to_plot,
                     plot_dir=specific_plot_dir,  # Use the YCol_vs_XCol directory
                     title_suffix=title_suffix_b10,
-                    filename_suffix=""  # Explicitly empty
+                    filename_suffix=filename_suffix_b10  # Pass the B10 value suffix
                 )
                 if success:
                     b10_level_plots_generated += 1
                 else:
                     b10_level_plots_failed += 1
-                    overall_success = False  # Mark overall analysis as partially failed if any plot fails
+                    overall_success = False
 
         # --- End of y_col loop ---
         print(f"--- Plotting Summary for {B10_CONST_FIXED_COL} = {b10_val} ---")
@@ -597,7 +570,7 @@ if __name__ == "__main__":
     # Derive input and output paths
     input_filename = f"{z}_{n}_AllMapFragments.parquet"
     parquet_file_path = os.path.join(INPUT_BASE_DIR, input_filename)
-    output_directory_zn = os.path.join(OUTPUT_BASE_DIR, f"{z}_{n}")  # Specific dir for this Z, N
+    output_directory_zn = os.path.join(OUTPUT_BASE_DIR, f"{z}_{n}")
 
     print(f"=== Starting Full Analysis for Z={z}, N={n} ===")
     print(f"Derived Input File: {parquet_file_path}")
@@ -635,7 +608,7 @@ if __name__ == "__main__":
             y_vs_b20_success_count += 1
         else:
             y_vs_b20_failure_count += 1
-        print("-" * 50)  # Separator
+        print("-" * 50)
 
     # --- Run Second Analysis Type (B10 Constant) ---
     b10_const_analysis_success = analyze_constant_b10(full_dataframe, output_directory_zn)
@@ -648,13 +621,10 @@ if __name__ == "__main__":
     print(f"Failed analyses:     {y_vs_b20_failure_count}")
 
     print("\n--- B10 Constant Analysis Summary ---")
-    if b10_const_analysis_success is False:  # Check specifically for False, as True means it ran (even if some plots failed within)
+    if b10_const_analysis_success is False:
         print("B10 Constant analysis encountered errors during execution.")
     elif b10_const_analysis_success is True:
         print("B10 Constant analysis completed (check logs for details on individual plots/values).")
-    # If the function returned None (e.g., due to missing columns), it wouldn't print success/failure here.
 
     print(f"\nAll outputs located in base directory: '{output_directory_zn}'")
     print("==============================================")
-
-# --- END OF FILE ParquetEnergySpaceAnalyzer.py ---
