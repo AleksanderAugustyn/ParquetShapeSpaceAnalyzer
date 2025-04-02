@@ -545,7 +545,7 @@ def analyze_constant_b10(full_df, base_output_dir_zn):
     return overall_success
 
 
-# --- Command Line Argument Parsing and Main Execution (Unchanged) ---
+# --- Command Line Argument Parsing and Main Execution ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Analyze Parquet fragment: find min energy points for (Bxx, B20) combinations, '
@@ -594,6 +594,31 @@ if __name__ == "__main__":
             sys.exit(1)
         full_dataframe = pd.read_parquet(parquet_file_path)
         print(f"Successfully read {len(full_dataframe)} rows.")
+
+        # --- ADDED CHECK HERE ---
+        if full_dataframe is not None and not full_dataframe.empty:
+            # Ensure the columns exist before attempting the check
+            if 'Mass' in full_dataframe.columns and ENERGY_COL in full_dataframe.columns:
+                # Convert columns to numeric, coercing errors to NaN, then fill NaN with a value not > 999 (like 0)
+                # This prevents errors if columns contain non-numeric strings
+                mass_numeric = pd.to_numeric(full_dataframe['Mass'], errors='coerce').fillna(0)
+                energy_numeric = pd.to_numeric(full_dataframe[ENERGY_COL], errors='coerce').fillna(0)
+
+                # Perform the check on the numeric columns
+                count_mass_energy_gt_999 = len(full_dataframe[
+                                                   (mass_numeric > 999) & (energy_numeric > 999)
+                                                   ])
+                print(f"Info: Found {count_mass_energy_gt_999} rows where both 'Mass' > 999 and '{ENERGY_COL}' > 999.")
+            else:
+                missing_check_cols = []
+                if 'Mass' not in full_dataframe.columns:
+                    missing_check_cols.append('Mass')
+                if ENERGY_COL not in full_dataframe.columns:
+                    missing_check_cols.append(ENERGY_COL)
+                print(
+                    f"Info: Could not perform Mass/TotalEnergy > 999 check: Missing columns: {', '.join(missing_check_cols)}.")
+        # --- END OF ADDED CHECK ---
+
     except Exception as e:
         print(f"Error reading Parquet file '{parquet_file_path}': {e}")
         sys.exit(1)
